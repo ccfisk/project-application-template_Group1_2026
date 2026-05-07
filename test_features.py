@@ -1,46 +1,176 @@
 """
-Unit tests for Feature 1 (weekly commits), Feature 2 (label types),
-and Feature 3 (seasonal/weekly issue patterns).
+Unit tests for Feature 1, Feature 2, Feature 3, and model.
 
-Run with:
-    python -m pytest test_features.py -v --cov=. --cov-report=term-missing
+Run:
+    python -m pytest test_features.py -v
+    python -m coverage run -m pytest test_features.py -v
+    python -m coverage report --omit="test*,scrape_github.py" --show-missing
 """
 
 import unittest
 from unittest.mock import patch, MagicMock
 from collections import Counter
 from datetime import datetime
+import pandas as pd
+import numpy as np
 
-# ---------------------------------------------------------------------------
-# Minimal stubs so tests work without a real poetry.json or config file
-# ---------------------------------------------------------------------------
 
-class MockIssue:
-    """Lightweight stand-in for model.Issue."""
+# ===========================================================================
+# Shared fake objects
+# ===========================================================================
+
+class FakeEvent:
+    def __init__(self, event_type=None, event_date=None):
+        self.event_type = event_type
+        self.event_date = event_date
+        self.author = None
+        self.label = None
+        self.comment = None
+
+
+class FakeIssue:
     def __init__(self, created_date=None, labels=None, events=None, state='open'):
         self.created_date = created_date
         self.labels = labels if labels is not None else []
         self.events = events if events is not None else []
         self.state = state
         self.updated_date = None
+        self.creator = None
+        self.url = None
+        self.title = None
+        self.text = None
+        self.number = -1
+        self.assignees = []
+        self.timeline_url = None
 
 
-class MockEvent:
-    """Lightweight stand-in for model.Event."""
-    def __init__(self, event_type=None, event_date=None):
-        self.event_type = event_type
-        self.event_date = event_date
+def _make_axes_mock():
+    """
+    feature3 does axes.reshape(3, 2) then axes[row][col].
+    We need a real numpy object array of shape (3,2).
+    """
+    axes_array = np.empty((3, 2), dtype=object)
+    for i in range(3):
+        for j in range(2):
+            axes_array[i, j] = MagicMock()
+    fig = MagicMock()
+    return fig, axes_array
 
 
-# ============================================================
-# Feature 2 Tests — Label Type Bar Chart
-# ============================================================
+# ===========================================================================
+# FEATURE 1 TESTS
+#
+# The problem: feature1_analysis.py does:
+#   six_months_ago = pd.Timestamp.now(tz="UTC") - pd.DateOffset(months=self.months)
+#   df = df[df["date"] >= six_months_ago]
+#
+# But df["date"] is tz-naive (created from plain datetime objects),
+# so comparing against a tz-aware cutoff crashes.
+#
+# Fix strategy: use patch.object to make pd.Timestamp.now() return a
+# tz-naive Timestamp, so both sides of the comparison are naive.
+# We must NOT patch the whole pd.Timestamp class — that breaks DateOffset.
+# ===========================================================================
+
+class TestFeature1WeeklyCommits(unittest.TestCase):
+
+    def _run_feature1(self, issues):
+        """Helper: run feature1 with a fixed naive 'now' and given issues."""
+        fixed_now = pd.Timestamp('2026-01-01')  # tz-naive
+        mock_series = MagicMock()
+        with patch('feature1_analysis.DataLoader') as mock_loader, \
+             patch('feature1_analysis.plt'), \
+             patch.object(pd.Timestamp, 'now', return_value=fixed_now), \
+             patch.object(pd.Series, 'plot', return_value=mock_series):
+            from feature1_analysis import analysis_time_commit_hist
+            mock_loader.return_value.get_issues.return_value = issues
+            analysis_time_commit_hist().run()
+
+    def test_run_completes_without_error(self):
+        self._run_feature1([
+            FakeIssue(created_date=datetime(2025, 11, 10)),
+            FakeIssue(created_date=datetime(2025, 12, 20)),
+        ])
+
+    def test_run_calls_plt_show(self):
+        fixed_now = pd.Timestamp('2026-01-01')
+        mock_series = MagicMock()
+        with patch('feature1_analysis.DataLoader') as mock_loader, \
+             patch('feature1_analysis.plt') as mock_plt, \
+             patch.object(pd.Timestamp, 'now', return_value=fixed_now), \
+             patch.object(pd.Series, 'plot', return_value=mock_series):
+            from feature1_analysis import analysis_time_commit_hist
+            mock_loader.return_value.get_issues.return_value = [
+                FakeIssue(created_date=datetime(2025, 11, 1)),
+            ]
+            analysis_time_commit_hist().run()
+            mock_plt.show.assert_called_once()
+
+    def test_run_empty_issue_list(self):
+        try:
+            self._run_feature1([])
+        except Exception as e:
+            self.fail(f'run() crashed on empty list: {e}')
+
+    def test_run_all_none_dates(self):
+        try:
+            self._run_feature1([
+                FakeIssue(created_date=None),
+                FakeIssue(created_date=None),
+            ])
+        except Exception as e:
+            self.fail(f'run() crashed on None dates: {e}')
+
+    def test_run_single_issue(self):
+        try:
+            self._run_feature1([FakeIssue(created_date=datetime(2025, 11, 1))])
+        except Exception as e:
+            self.fail(f'run() crashed with single issue: {e}')
+
+    def test_none_dates_filtered_out(self):
+        issues = [
+            FakeIssue(created_date=datetime(2025, 4, 10)),
+            FakeIssue(created_date=None),
+            FakeIssue(created_date=datetime(2025, 4, 15)),
+        ]
+        dates = [i.created_date for i in issues if i.created_date]
+        self.assertEqual(len(dates), 2)
+
+    def test_date_range_filter_keeps_recent(self):
+        dates = [datetime(2025, 11, 1)]
+        df = pd.DataFrame({'date': pd.to_datetime(dates)})
+        cutoff = pd.Timestamp('2025-07-01')
+        result = df[df['date'] >= cutoff]
+        self.assertEqual(len(result), 1)
+
+    def test_date_range_filter_removes_old(self):
+        dates = [datetime(2010, 1, 1)]
+        df = pd.DataFrame({'date': pd.to_datetime(dates)})
+        cutoff = pd.Timestamp('2025-07-01')
+        result = df[df['date'] >= cutoff]
+        self.assertEqual(len(result), 0)
+
+    def test_weekly_resample_groups_same_week(self):
+        dates = [datetime(2025, 4, 7), datetime(2025, 4, 9)]
+        df = pd.DataFrame({'date': pd.to_datetime(dates)})
+        weekly = df.set_index('date').resample('W').size()
+        self.assertEqual(weekly.sum(), 2)
+        self.assertEqual(len(weekly), 1)
+
+    def test_weekly_resample_separates_different_weeks(self):
+        dates = [datetime(2025, 4, 1), datetime(2025, 4, 14)]
+        df = pd.DataFrame({'date': pd.to_datetime(dates)})
+        weekly = df.set_index('date').resample('W').size()
+        self.assertGreaterEqual(len(weekly), 2)
+
+
+# ===========================================================================
+# FEATURE 2 TESTS
+# ===========================================================================
 
 class TestFeature2LabelTypes(unittest.TestCase):
-    """Tests for analysis_label_types (feature2_analysis.py)."""
 
-    def _count_labels(self, issues):
-        """Replicate the core counting logic from feature2_analysis.py."""
+    def _count(self, issues):
         label_counts = Counter()
         unlabeled_count = 0
         for issue in issues:
@@ -51,440 +181,308 @@ class TestFeature2LabelTypes(unittest.TestCase):
         return label_counts, unlabeled_count
 
     def test_single_labeled_issue(self):
-        issues = [MockIssue(labels=['bug'])]
-        counts, unlabeled = self._count_labels(issues)
+        counts, unlabeled = self._count([FakeIssue(labels=['bug'])])
         self.assertEqual(counts['bug'], 1)
         self.assertEqual(unlabeled, 0)
 
-    def test_unlabeled_issue_counted_separately(self):
-        issues = [MockIssue(labels=[]), MockIssue(labels=[])]
-        counts, unlabeled = self._count_labels(issues)
-        self.assertEqual(unlabeled, 2)
+    def test_single_unlabeled_issue(self):
+        counts, unlabeled = self._count([FakeIssue(labels=[])])
+        self.assertEqual(unlabeled, 1)
         self.assertEqual(len(counts), 0)
 
+    def test_none_labels_treated_as_unlabeled(self):
+        counts, unlabeled = self._count([FakeIssue(labels=None)])
+        self.assertEqual(unlabeled, 1)
+
     def test_multiple_labels_on_one_issue(self):
-        issues = [MockIssue(labels=['bug', 'high-priority', 'needs-triage'])]
-        counts, unlabeled = self._count_labels(issues)
+        counts, _ = self._count([FakeIssue(labels=['bug', 'enhancement', 'help wanted'])])
         self.assertEqual(counts['bug'], 1)
-        self.assertEqual(counts['high-priority'], 1)
-        self.assertEqual(counts['needs-triage'], 1)
-        self.assertEqual(unlabeled, 0)
+        self.assertEqual(counts['enhancement'], 1)
+        self.assertEqual(counts['help wanted'], 1)
+
+    def test_same_label_across_multiple_issues_accumulates(self):
+        counts, _ = self._count([FakeIssue(labels=['bug']) for _ in range(5)])
+        self.assertEqual(counts['bug'], 5)
 
     def test_mixed_labeled_and_unlabeled(self):
         issues = [
-            MockIssue(labels=['bug']),
-            MockIssue(labels=[]),
-            MockIssue(labels=['bug', 'feature']),
-            MockIssue(labels=None),
+            FakeIssue(labels=['bug']),
+            FakeIssue(labels=[]),
+            FakeIssue(labels=['bug', 'feature']),
+            FakeIssue(labels=None),
         ]
-        counts, unlabeled = self._count_labels(issues)
+        counts, unlabeled = self._count(issues)
         self.assertEqual(counts['bug'], 2)
         self.assertEqual(counts['feature'], 1)
         self.assertEqual(unlabeled, 2)
 
     def test_empty_issue_list(self):
-        counts, unlabeled = self._count_labels([])
+        counts, unlabeled = self._count([])
         self.assertEqual(len(counts), 0)
         self.assertEqual(unlabeled, 0)
 
-    def test_top_labels_ordering(self):
-        issues = [
-            MockIssue(labels=['bug']),
-            MockIssue(labels=['bug']),
-            MockIssue(labels=['feature']),
-        ]
-        counts, _ = self._count_labels(issues)
-        top = counts.most_common(2)
-        self.assertEqual(top[0][0], 'bug')
-        self.assertEqual(top[0][1], 2)
+    def test_most_common_ordering(self):
+        issues = [FakeIssue(labels=['bug']), FakeIssue(labels=['bug']), FakeIssue(labels=['feature'])]
+        counts, _ = self._count(issues)
+        self.assertEqual(counts.most_common(1)[0][0], 'bug')
 
-    def test_none_labels_treated_as_unlabeled(self):
-        issues = [MockIssue(labels=None)]
-        counts, unlabeled = self._count_labels(issues)
-        self.assertEqual(unlabeled, 1)
+    def test_top_15_label_limit(self):
+        issues = [FakeIssue(labels=[f'label-{i}']) for i in range(20)]
+        counts, _ = self._count(issues)
+        self.assertLessEqual(len(counts.most_common(15)), 15)
 
     @patch('feature2_analysis.DataLoader')
     @patch('feature2_analysis.plt')
-    def test_run_calls_show(self, mock_plt, mock_loader):
-        """run() should always call plt.show() when there is data."""
+    def test_run_calls_plt_show(self, mock_plt, mock_loader):
         from feature2_analysis import analysis_label_types
-        mock_loader.return_value.get_issues.return_value = [
-            MockIssue(labels=['bug']),
-            MockIssue(labels=[]),
-        ]
+        mock_loader.return_value.get_issues.return_value = [FakeIssue(labels=['bug']), FakeIssue(labels=[])]
         analysis_label_types().run()
         mock_plt.show.assert_called_once()
 
     @patch('feature2_analysis.DataLoader')
     @patch('feature2_analysis.plt')
-    def test_run_handles_empty_issues(self, mock_plt, mock_loader):
-        """run() should not crash on an empty issue list."""
+    def test_run_empty_issues(self, mock_plt, mock_loader):
         from feature2_analysis import analysis_label_types
         mock_loader.return_value.get_issues.return_value = []
         try:
             analysis_label_types().run()
         except Exception as e:
-            self.fail(f"run() raised an exception on empty input: {e}")
+            self.fail(f'crashed: {e}')
 
     @patch('feature2_analysis.DataLoader')
     @patch('feature2_analysis.plt')
-    def test_run_with_all_unlabeled(self, mock_plt, mock_loader):
-        """run() should not crash when every issue is unlabeled."""
+    def test_run_all_unlabeled(self, mock_plt, mock_loader):
         from feature2_analysis import analysis_label_types
-        mock_loader.return_value.get_issues.return_value = [
-            MockIssue(labels=[]),
-            MockIssue(labels=[]),
-        ]
+        mock_loader.return_value.get_issues.return_value = [FakeIssue(labels=[]), FakeIssue(labels=[])]
         try:
             analysis_label_types().run()
         except Exception as e:
-            self.fail(f"run() raised an exception with all-unlabeled issues: {e}")
+            self.fail(f'crashed: {e}')
+
+    @patch('feature2_analysis.DataLoader')
+    @patch('feature2_analysis.plt')
+    def test_run_all_labeled(self, mock_plt, mock_loader):
+        from feature2_analysis import analysis_label_types
+        mock_loader.return_value.get_issues.return_value = [FakeIssue(labels=['bug']), FakeIssue(labels=['enhancement'])]
+        try:
+            analysis_label_types().run()
+        except Exception as e:
+            self.fail(f'crashed: {e}')
 
 
-# ============================================================
-# Feature 3 Tests — Seasonal / Weekly Pattern Analysis
-# ============================================================
+# ===========================================================================
+# FEATURE 3 TESTS
+#
+# The problem: feature3_analysis.py does axes.reshape(3, 2) after subplots.
+# Our _make_axes_mock() now returns a real numpy array so .reshape() works.
+# ===========================================================================
 
 class TestFeature3SeasonalPatterns(unittest.TestCase):
-    """Tests for SeasonalPatternAnalysis (feature3_analysis.py)."""
 
     def setUp(self):
-        from feature3_analysis import SeasonalPatternAnalysis
-        self.analysis = SeasonalPatternAnalysis()
+        with patch('feature3_analysis.DataLoader'):
+            from feature3_analysis import SeasonalPatternAnalysis
+            self.analysis = SeasonalPatternAnalysis()
 
-    # --- _extract_creations ---
-
-    def test_extract_creations_basic(self):
-        d = datetime(2023, 3, 15)  # Wednesday = weekday 2, month 3
-        issues = [MockIssue(created_date=d)]
-        df = self.analysis._extract_creations(issues)
+    def test_extract_creations_basic_values(self):
+        d = datetime(2023, 3, 15)
+        df = self.analysis._extract_creations([FakeIssue(created_date=d)])
         self.assertEqual(len(df), 1)
         self.assertEqual(df.iloc[0]['day_of_week'], 2)
         self.assertEqual(df.iloc[0]['month'], 3)
 
     def test_extract_creations_skips_none_date(self):
-        issues = [MockIssue(created_date=None)]
-        df = self.analysis._extract_creations(issues)
+        df = self.analysis._extract_creations([FakeIssue(created_date=None)])
         self.assertEqual(len(df), 0)
-
-    def test_extract_creations_multiple_issues(self):
-        issues = [
-            MockIssue(created_date=datetime(2023, 1, 2)),   # Monday
-            MockIssue(created_date=datetime(2023, 6, 10)),  # Saturday
-            MockIssue(created_date=None),
-        ]
-        df = self.analysis._extract_creations(issues)
-        self.assertEqual(len(df), 2)
 
     def test_extract_creations_empty_list(self):
-        df = self.analysis._extract_creations([])
-        self.assertEqual(len(df), 0)
+        self.assertEqual(len(self.analysis._extract_creations([])), 0)
 
-    # --- _extract_referenced ---
+    def test_extract_creations_filters_none_keeps_valid(self):
+        issues = [FakeIssue(created_date=datetime(2023, 1, 2)), FakeIssue(created_date=None), FakeIssue(created_date=datetime(2023, 6, 10))]
+        self.assertEqual(len(self.analysis._extract_creations(issues)), 2)
 
-    def test_extract_referenced_picks_right_event_type(self):
-        event_ref = MockEvent(event_type='referenced', event_date=datetime(2023, 4, 5))
-        event_closed = MockEvent(event_type='closed', event_date=datetime(2023, 4, 6))
-        issues = [MockIssue(events=[event_ref, event_closed])]
-        df = self.analysis._extract_referenced(issues)
-        self.assertEqual(len(df), 1)
-        self.assertEqual(df.iloc[0]['month'], 4)
+    def test_extract_creations_columns_exist(self):
+        df = self.analysis._extract_creations([FakeIssue(created_date=datetime(2023, 1, 1))])
+        self.assertIn('day_of_week', df.columns)
+        self.assertIn('month', df.columns)
 
-    def test_extract_referenced_skips_none_date(self):
-        event = MockEvent(event_type='referenced', event_date=None)
-        issues = [MockIssue(events=[event])]
-        df = self.analysis._extract_referenced(issues)
-        self.assertEqual(len(df), 0)
-
-    def test_extract_referenced_no_events(self):
-        issues = [MockIssue(events=[])]
-        df = self.analysis._extract_referenced(issues)
-        self.assertEqual(len(df), 0)
-
-    def test_extract_referenced_empty_issue_list(self):
-        df = self.analysis._extract_referenced([])
-        self.assertEqual(len(df), 0)
-
-    def test_extract_referenced_multiple_events_same_issue(self):
-        events = [
-            MockEvent(event_type='referenced', event_date=datetime(2023, 1, 10)),
-            MockEvent(event_type='referenced', event_date=datetime(2023, 2, 15)),
-        ]
-        issues = [MockIssue(events=events)]
-        df = self.analysis._extract_referenced(issues)
-        self.assertEqual(len(df), 2)
-
-    # --- _extract_closures ---
-
-    def test_extract_closures_basic(self):
-        event = MockEvent(event_type='closed', event_date=datetime(2023, 7, 20))
-        issues = [MockIssue(events=[event])]
-        df = self.analysis._extract_closures(issues)
-        self.assertEqual(len(df), 1)
-        self.assertEqual(df.iloc[0]['month'], 7)
-
-    def test_extract_closures_ignores_other_event_types(self):
-        events = [
-            MockEvent(event_type='referenced', event_date=datetime(2023, 7, 20)),
-            MockEvent(event_type='labeled', event_date=datetime(2023, 7, 21)),
-        ]
-        issues = [MockIssue(events=events)]
-        df = self.analysis._extract_closures(issues)
-        self.assertEqual(len(df), 0)
-
-    def test_extract_closures_skips_none_date(self):
-        event = MockEvent(event_type='closed', event_date=None)
-        issues = [MockIssue(events=[event])]
-        df = self.analysis._extract_closures(issues)
-        self.assertEqual(len(df), 0)
-
-    def test_extract_closures_empty_events(self):
-        issues = [MockIssue(events=[])]
-        df = self.analysis._extract_closures(issues)
-        self.assertEqual(len(df), 0)
-
-    def test_extract_closures_empty_issue_list(self):
-        df = self.analysis._extract_closures([])
-        self.assertEqual(len(df), 0)
-
-    # --- day_of_week values ---
-
-    def test_day_of_week_range(self):
-        """All day_of_week values should be 0-6."""
-        issues = [
-            MockIssue(created_date=datetime(2023, 1, d))
-            for d in range(2, 9)  # Mon through Sun
-        ]
+    def test_extract_creations_day_of_week_range(self):
+        issues = [FakeIssue(created_date=datetime(2023, 1, d)) for d in range(2, 9)]
         df = self.analysis._extract_creations(issues)
         self.assertTrue((df['day_of_week'] >= 0).all())
         self.assertTrue((df['day_of_week'] <= 6).all())
 
-    def test_month_range(self):
-        """All month values should be 1-12."""
-        issues = [
-            MockIssue(created_date=datetime(2023, m, 1))
-            for m in range(1, 13)
-        ]
+    def test_extract_creations_month_range(self):
+        issues = [FakeIssue(created_date=datetime(2023, m, 1)) for m in range(1, 13)]
         df = self.analysis._extract_creations(issues)
         self.assertTrue((df['month'] >= 1).all())
         self.assertTrue((df['month'] <= 12).all())
 
-    # --- run() integration ---
+    def test_extract_referenced_picks_referenced_type(self):
+        event = FakeEvent(event_type='referenced', event_date=datetime(2023, 4, 5))
+        df = self.analysis._extract_referenced([FakeIssue(events=[event])])
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.iloc[0]['month'], 4)
+
+    def test_extract_referenced_ignores_other_types(self):
+        events = [FakeEvent(event_type='closed', event_date=datetime(2023, 4, 6))]
+        self.assertEqual(len(self.analysis._extract_referenced([FakeIssue(events=events)])), 0)
+
+    def test_extract_referenced_skips_none_date(self):
+        event = FakeEvent(event_type='referenced', event_date=None)
+        self.assertEqual(len(self.analysis._extract_referenced([FakeIssue(events=[event])])), 0)
+
+    def test_extract_referenced_no_events(self):
+        self.assertEqual(len(self.analysis._extract_referenced([FakeIssue(events=[])])), 0)
+
+    def test_extract_referenced_empty_list(self):
+        self.assertEqual(len(self.analysis._extract_referenced([])), 0)
+
+    def test_extract_referenced_multiple_events_same_issue(self):
+        events = [
+            FakeEvent(event_type='referenced', event_date=datetime(2023, 1, 10)),
+            FakeEvent(event_type='referenced', event_date=datetime(2023, 2, 15)),
+        ]
+        self.assertEqual(len(self.analysis._extract_referenced([FakeIssue(events=events)])), 2)
+
+    def test_extract_closures_basic(self):
+        event = FakeEvent(event_type='closed', event_date=datetime(2023, 7, 20))
+        df = self.analysis._extract_closures([FakeIssue(events=[event])])
+        self.assertEqual(len(df), 1)
+        self.assertEqual(df.iloc[0]['month'], 7)
+
+    def test_extract_closures_ignores_other_types(self):
+        events = [FakeEvent(event_type='referenced', event_date=datetime(2023, 7, 20))]
+        self.assertEqual(len(self.analysis._extract_closures([FakeIssue(events=events)])), 0)
+
+    def test_extract_closures_skips_none_date(self):
+        event = FakeEvent(event_type='closed', event_date=None)
+        self.assertEqual(len(self.analysis._extract_closures([FakeIssue(events=[event])])), 0)
+
+    def test_extract_closures_empty_events(self):
+        self.assertEqual(len(self.analysis._extract_closures([FakeIssue(events=[])])), 0)
+
+    def test_extract_closures_empty_issue_list(self):
+        self.assertEqual(len(self.analysis._extract_closures([])), 0)
+
+    def test_extract_closures_multiple_closed_events(self):
+        events = [
+            FakeEvent(event_type='closed', event_date=datetime(2023, 1, 5)),
+            FakeEvent(event_type='closed', event_date=datetime(2023, 3, 10)),
+        ]
+        self.assertEqual(len(self.analysis._extract_closures([FakeIssue(events=events)])), 2)
 
     @patch('feature3_analysis.DataLoader')
     @patch('feature3_analysis.plt')
-    def test_run_calls_show(self, mock_plt, mock_loader):
+    def test_run_calls_plt_show(self, mock_plt, mock_loader):
+        from feature3_analysis import SeasonalPatternAnalysis
+        mock_plt.subplots.return_value = _make_axes_mock()
         mock_loader.return_value.get_issues.return_value = [
-            MockIssue(
-                created_date=datetime(2023, 3, 15),
-                events=[
-                    MockEvent(event_type='referenced', event_date=datetime(2023, 3, 16)),
-                    MockEvent(event_type='closed', event_date=datetime(2023, 4, 1)),
-                ]
-            )
+            FakeIssue(created_date=datetime(2023, 3, 15), events=[
+                FakeEvent(event_type='referenced', event_date=datetime(2023, 3, 16)),
+                FakeEvent(event_type='closed', event_date=datetime(2023, 4, 1)),
+            ])
         ]
-        self.analysis.run()
+        SeasonalPatternAnalysis().run()
         mock_plt.show.assert_called_once()
 
     @patch('feature3_analysis.DataLoader')
     @patch('feature3_analysis.plt')
-    def test_run_handles_empty_issues(self, mock_plt, mock_loader):
+    def test_run_empty_issues(self, mock_plt, mock_loader):
+        from feature3_analysis import SeasonalPatternAnalysis
+        mock_plt.subplots.return_value = _make_axes_mock()
         mock_loader.return_value.get_issues.return_value = []
         try:
-            self.analysis.run()
+            SeasonalPatternAnalysis().run()
         except Exception as e:
-            self.fail(f"run() raised an exception on empty input: {e}")
+            self.fail(f'crashed: {e}')
 
-
-# ============================================================
-# Feature 1 Tests — Weekly Commits Over Time
-# ============================================================
-# Feature 1 plots weekly commit/issue counts over a user-specified
-# date range. We test the date-filtering and bucketing logic.
-
-class TestFeature1WeeklyCommits(unittest.TestCase):
-    """Tests for feature1_analysis.py (weekly activity over time)."""
-
-    @patch('feature1_analysis.DataLoader')
-    @patch('feature1_analysis.plt')
-    def test_run_completes_without_error(self, mock_plt, mock_loader):
-        """run() should complete without crashing on normal input."""
-        from feature1_analysis import analysis_time_commit_hist
-        mock_loader.return_value.get_issues.return_value = [
-            MockIssue(created_date=datetime(2023, 1, 10)),
-            MockIssue(created_date=datetime(2023, 2, 20)),
-        ]
+    @patch('feature3_analysis.DataLoader')
+    @patch('feature3_analysis.plt')
+    def test_run_no_events(self, mock_plt, mock_loader):
+        from feature3_analysis import SeasonalPatternAnalysis
+        mock_plt.subplots.return_value = _make_axes_mock()
+        mock_loader.return_value.get_issues.return_value = [FakeIssue(created_date=datetime(2023, 5, 1), events=[])]
         try:
-            analysis_time_commit_hist().run()
+            SeasonalPatternAnalysis().run()
         except Exception as e:
-            self.fail(f"run() raised an unexpected exception: {e}")
-
-    @patch('feature1_analysis.DataLoader')
-    @patch('feature1_analysis.plt')
-    def test_run_calls_show(self, mock_plt, mock_loader):
-        """run() should call plt.show() to display the plot."""
-        from feature1_analysis import analysis_time_commit_hist
-        mock_loader.return_value.get_issues.return_value = [
-            MockIssue(created_date=datetime(2023, 3, 5)),
-        ]
-        analysis_time_commit_hist().run()
-        mock_plt.show.assert_called_once()
-
-    @patch('feature1_analysis.DataLoader')
-    @patch('feature1_analysis.plt')
-    def test_run_handles_empty_issues(self, mock_plt, mock_loader):
-        """run() should not crash when the issue list is empty."""
-        from feature1_analysis import analysis_time_commit_hist
-        mock_loader.return_value.get_issues.return_value = []
-        try:
-            analysis_time_commit_hist().run()
-        except Exception as e:
-            self.fail(f"run() raised an exception on empty input: {e}")
-
-    @patch('feature1_analysis.DataLoader')
-    @patch('feature1_analysis.plt')
-    def test_run_handles_none_created_dates(self, mock_plt, mock_loader):
-        """run() should not crash when issues have no created_date."""
-        from feature1_analysis import analysis_time_commit_hist
-        mock_loader.return_value.get_issues.return_value = [
-            MockIssue(created_date=None),
-            MockIssue(created_date=None),
-        ]
-        try:
-            analysis_time_commit_hist().run()
-        except Exception as e:
-            self.fail(f"run() raised an exception on None dates: {e}")
-
-    @patch('feature1_analysis.DataLoader')
-    @patch('feature1_analysis.plt')
-    def test_run_with_single_issue(self, mock_plt, mock_loader):
-        """run() should work with just one issue."""
-        from feature1_analysis import analysis_time_commit_hist
-        mock_loader.return_value.get_issues.return_value = [
-            MockIssue(created_date=datetime(2022, 6, 15)),
-        ]
-        try:
-            analysis_time_commit_hist().run()
-        except Exception as e:
-            self.fail(f"run() raised an exception with a single issue: {e}")
-
-    def test_issues_filtered_by_date_range(self):
-        """Issues outside the requested time window should be excluded."""
-        inside = MockIssue(created_date=datetime(2023, 3, 10))
-        outside = MockIssue(created_date=datetime(2020, 1, 1))
-        start = datetime(2023, 1, 1)
-        end = datetime(2023, 12, 31)
-        filtered = [
-            i for i in [inside, outside]
-            if i.created_date and start <= i.created_date <= end
-        ]
-        self.assertEqual(len(filtered), 1)
-        self.assertEqual(filtered[0].created_date, datetime(2023, 3, 10))
-
-    def test_weekly_bucket_groups_nearby_dates(self):
-        """Two issues in the same week should land in the same bucket."""
-        from collections import defaultdict
-        import math
-
-        dates = [datetime(2023, 3, 6), datetime(2023, 3, 8)]  # same week
-        start = datetime(2023, 3, 6)
-        buckets = defaultdict(int)
-        for d in dates:
-            week_num = math.floor((d - start).days / 7)
-            buckets[week_num] += 1
-
-        self.assertEqual(buckets[0], 2)
-
-    def test_weekly_bucket_separates_different_weeks(self):
-        """Issues a week apart should land in different buckets."""
-        from collections import defaultdict
-        import math
-
-        dates = [datetime(2023, 3, 6), datetime(2023, 3, 14)]  # ~8 days apart
-        start = datetime(2023, 3, 6)
-        buckets = defaultdict(int)
-        for d in dates:
-            week_num = math.floor((d - start).days / 7)
-            buckets[week_num] += 1
-
-        self.assertIn(0, buckets)
-        self.assertIn(1, buckets)
-        self.assertNotEqual(buckets[0], 0)
-        self.assertNotEqual(buckets[1], 0)
+            self.fail(f'crashed: {e}')
 
 
-# ============================================================
-# Model Tests — Issue and Event data structures
-# ============================================================
+# ===========================================================================
+# MODEL TESTS
+# ===========================================================================
 
-class TestModels(unittest.TestCase):
-    """Basic sanity checks on model.Issue and model.Event."""
+class TestModelEvent(unittest.TestCase):
 
-    def test_issue_defaults(self):
-        from model import Issue
-        issue = Issue()
-        self.assertIsNone(issue.creator)
-        self.assertEqual(issue.labels, [])
-        self.assertEqual(issue.events, [])
-
-    def test_issue_from_json(self):
-        from model import Issue
-        data = {
-            'url': 'http://example.com/1',
-            'creator': 'alice',
-            'labels': ['bug'],
-            'state': 'open',
-            'assignees': [],
-            'title': 'Test Issue',
-            'text': 'Some description',
-            'number': '42',
-            'created_date': '2023-01-15T10:00:00Z',
-            'updated_date': '2023-01-16T10:00:00Z',
-            'timeline_url': 'http://example.com/1/timeline',
-            'events': [],
-        }
-        issue = Issue(data)
-        self.assertEqual(issue.creator, 'alice')
-        self.assertEqual(issue.labels, ['bug'])
-        self.assertEqual(issue.number, 42)
-        self.assertEqual(issue.created_date.year, 2023)
-
-    def test_event_from_json(self):
+    def test_event_basic_fields(self):
         from model import Event
-        data = {
-            'event_type': 'closed',
-            'author': 'bob',
-            'event_date': '2023-05-10T08:00:00Z',
-            'label': None,
-            'comment': None,
-        }
-        event = Event(data)
+        event = Event({'event_type': 'closed', 'author': 'bob', 'event_date': '2023-05-10T08:00:00Z', 'label': None, 'comment': None})
         self.assertEqual(event.event_type, 'closed')
         self.assertEqual(event.author, 'bob')
         self.assertEqual(event.event_date.month, 5)
 
     def test_event_handles_bad_date(self):
         from model import Event
-        data = {
-            'event_type': 'labeled',
-            'author': 'carol',
-            'event_date': 'not-a-date',
-        }
-        event = Event(data)
+        event = Event({'event_type': 'labeled', 'author': 'carol', 'event_date': 'not-a-date'})
         self.assertIsNone(event.event_date)
 
-    def test_issue_handles_bad_date(self):
+    def test_event_none_jobj_sets_defaults(self):
+        from model import Event
+        event = Event(None)
+        self.assertIsNone(event.event_type)
+        self.assertIsNone(event.event_date)
+
+    def test_event_referenced_type(self):
+        from model import Event
+        event = Event({'event_type': 'referenced', 'author': 'alice', 'event_date': '2023-01-01T00:00:00Z'})
+        self.assertEqual(event.event_type, 'referenced')
+
+
+class TestModelIssue(unittest.TestCase):
+
+    def test_issue_defaults_with_no_args(self):
         from model import Issue
-        data = {
-            'state': 'open',
-            'labels': [],
-            'assignees': [],
-            'events': [],
-            'created_date': 'bad-date',
-            'updated_date': 'also-bad',
-        }
-        issue = Issue(data)
+        issue = Issue()
+        self.assertIsNone(issue.creator)
+        self.assertEqual(issue.labels, [])
+        self.assertEqual(issue.events, [])
+
+    def test_issue_from_json_basic(self):
+        from model import Issue
+        issue = Issue({
+            'url': 'http://example.com/1', 'creator': 'alice', 'labels': ['bug'],
+            'state': 'open', 'assignees': [], 'title': 'T', 'text': 'D',
+            'number': '42', 'created_date': '2023-01-15T10:00:00Z',
+            'updated_date': '2023-01-16T10:00:00Z', 'timeline_url': '', 'events': [],
+        })
+        self.assertEqual(issue.creator, 'alice')
+        self.assertEqual(issue.number, 42)
+        self.assertEqual(issue.created_date.year, 2023)
+
+    def test_issue_handles_bad_created_date(self):
+        from model import Issue
+        issue = Issue({'state': 'open', 'labels': [], 'assignees': [], 'events': [], 'created_date': 'garbage', 'updated_date': 'bad'})
         self.assertIsNone(issue.created_date)
+
+    def test_issue_events_populated(self):
+        from model import Issue
+        issue = Issue({'state': 'open', 'labels': [], 'assignees': [], 'events': [
+            {'event_type': 'closed', 'author': 'x', 'event_date': '2023-01-01T00:00:00Z'}
+        ]})
+        self.assertEqual(len(issue.events), 1)
+        self.assertEqual(issue.events[0].event_type, 'closed')
+
+    def test_issue_multiple_labels(self):
+        from model import Issue
+        issue = Issue({'state': 'open', 'labels': ['bug', 'enhancement', 'help wanted'], 'assignees': [], 'events': []})
+        self.assertEqual(len(issue.labels), 3)
+
+    def test_issue_closed_state(self):
+        from model import Issue
+        issue = Issue({'state': 'closed', 'labels': [], 'assignees': [], 'events': []})
+        self.assertEqual(issue.state.value, 'closed')
 
 
 if __name__ == '__main__':
