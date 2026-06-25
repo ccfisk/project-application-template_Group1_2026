@@ -17,7 +17,7 @@ class SeasonalPatternAnalysis:
     Plots issue creations, referenced events, and closures by day-of-week
     and month-of-year in a 2x3 subplot grid.
     """
-
+    
     def run(self):
         """
         Loads all issues and plots seasonal/weekly activity patterns.
@@ -31,6 +31,7 @@ class SeasonalPatternAnalysis:
         print(f'\nCreations: {len(df_create)}  |  Referenced Events: {len(df_ref)}  |  Closures: {len(df_close)}\n')
 
         fig, axes = plt.subplots(3, 2, figsize=(14, 12))
+        axes = axes.reshape(3, 2)
         fig.suptitle('Seasonal & Weekly Patterns in Issue Activity', fontsize=14)
 
         rows = [

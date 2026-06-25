@@ -19,7 +19,7 @@ class analysis_time_commit_hist:
         """
         # Parameter is passed in via command line (--months)
         self.months = config.get_parameter('months', default=6)
-    
+    import pandas as pd
     def run(self):
         """
         Plots number of commits in the last number of months
@@ -27,7 +27,7 @@ class analysis_time_commit_hist:
         issues:List[Issue] = DataLoader().get_issues()
 
         # Extract created dates from Issue objects
-        dates = [issue.created_date for issue in issues if issue.created_date]
+        dates = [pd.to_datetime(issue.created_date) for issue in issues if issue.created_date is not None]
 
         # Convert to DataFrame, then strip timezone so the column is tz-naive.
         df = pd.DataFrame({"date": pd.to_datetime(dates, utc=True)})
